@@ -5,8 +5,8 @@ root = .
 builddir = build
 cxx = c++
 ar = ar
-cflags = -std=c++17 -O3 -fno-exceptions -fno-rtti -Iinclude
-ldflags = -Lbuild
+cflags = -std=c++17 -O3 -fno-exceptions -fno-rtti -I$root/include
+ldflags = -Wl,-export_dynamic
 
 rule cxx
   command = $cxx -MD -MF $out.d $cflags -c $in -o $out
@@ -14,22 +14,10 @@ rule cxx
   depfile = $out.d
   deps = gcc
 
-rule ar
-  command = rm -f $out && $ar crs $out $in
-  description = AR $out
-
 rule link
   command = $cxx $ldflags -o $out $in $libs
   description = LINK $out
 
 build $builddir/src/mobius.o: cxx $root/src/mobius.cpp
-build $builddir/mobius: link $builddir/src/mobius.o
-  ldflags = $ldflags -Wl,-export_dynamic
-
-rule mobius
-  command = mobius $builddir
-  generator = 1
-  depfile = build.d
-  deps = gcc
-build build.ninja: mobius | $root/build.cpp
+build mobius: link $builddir/src/mobius.o
 
