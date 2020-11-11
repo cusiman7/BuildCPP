@@ -1,8 +1,10 @@
 
 #pragma once
 
-#include <string>
 #include <vector>
+#include <mobius/string.h>
+
+namespace mobius {
 
 enum class TargetType {
     Executable,
@@ -46,16 +48,17 @@ struct Toolchain {
 };
 
 struct Target {
-    Target(std::string name, TargetType type) 
+    Target(String name, TargetType type) 
     : name(name), type(type) {}
-    Target(std::string name, TargetType type, std::vector<std::string> inputs) 
+    Target(String name, TargetType type, std::vector<String> inputs) 
     : name(name), type(type), inputs(std::move(inputs)) {}
 
-    std::string name;
+    String name;
     TargetType type;
-    std::vector<std::string> inputs;
+    std::vector<String> inputs;
 
-    std::vector<std::string> linkFlags;
+    std::vector<String> compileFlags;
+    std::vector<String> linkFlags;
 };
 
 struct Project {
@@ -65,22 +68,20 @@ struct Project {
     const Toolchain toolchain;
     std::vector<Target> targets;
     
-    std::vector<std::string> includeDirectories;
-    std::vector<std::string> linkDirectories;
+    std::vector<String> includeDirectories;
+    std::vector<String> linkDirectories;
 };
 
-// Mobius API
-namespace mobius {
-std::string BuildDir();
-} // namespace mobius
+String BuildDir();
 
 using ProjectFn = Project (*)(Toolchain toolchain);
 struct MobiusEntry {
     ProjectFn genProject;
 };
+} // namespace mobius
 
 #ifdef MOBIUS_ENTRY
-Project GenProject(Toolchain toolchain);
-MobiusEntry mobiusEntry{ GenProject };
+mobius::Project GenProject(mobius::Toolchain toolchain);
+mobius::MobiusEntry mobiusEntry{ GenProject };
 #endif
 

@@ -1,2 +1,6 @@
 build
 mobius
+!include/*
+*.swp
+tags
+*.dSYM

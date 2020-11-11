@@ -7,97 +7,58 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unordered_map>
-#include <stdexcept>
 
 #include <mobius/mobius.h>
+#include <mobius/string.h>
 
-void* VirtualAlloc(size_t len);
-struct StringArena {
-    StringArena() = default;
-    StringArena(const StringArena&) = delete;
-    StringArena(StringArena&&) = delete;
-
-    char* Alloc(size_t len) {
-        if (used_ + len > size_) {
-            size_ = 1u << 30;
-            buf_ = static_cast<char*>(VirtualAlloc(size_));
-            used_ = 0;
-        }
-        char* ret = buf_ + used_; 
-        used_ += len;
-        return ret;
-    }
-
-private:
-    char* buf_ = nullptr;
-    size_t size_ = 0;
-    size_t used_ = 0;
-};
-static StringArena gStringArena;
-
-struct String {
-    String() = default;
-    String(const String&) = default;
-    String(String&&) = default;
-    String& operator=(const String&) = default;
-    String& operator=(String&&) = default;
-    explicit String(const char* str) : buf_(str), len_(strlen(str)) {}
-    String(const char* str, size_t len) : buf_(str), len_(len) {}
-
-    bool Empty() const {
-        return buf_ == nullptr;
-    }
-
-    size_t Len() const {
-        return len_;
-    }
-
-    const char* CStr() const {
-        return buf_;
-    }
-
-    char operator[](size_t i) {
-        return buf_[i];
-    }
-private:
-    const char* buf_ = nullptr;
-    size_t len_ = 0;
-};
-String operator "" _s(const char* str, size_t len) {
-    return String(str, len);
+namespace {
+void* VirtualAlloc(size_t len) {
+    return mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
 }
+
+struct StringArena {
+    char* buf = nullptr;
+    size_t size = 0;
+    size_t used = 0;
+};
+
+char* AllocString(size_t len) {
+    static StringArena arena;
+    if (arena.used + len > arena.size) {
+        arena.size = 1u << 30;
+        arena.buf = static_cast<char*>(VirtualAlloc(arena.size));
+        arena.used = 0;
+    }
+    char* ret = arena.buf + arena.used; 
+    arena.used += len;
+    return ret;
+}
+} // namespace
+
+namespace mobius {
 
 String NewString(const char* str) {
     size_t len = strlen(str);
-    char* buf = gStringArena.Alloc(len+1);
+    char* buf = AllocString(len+1);
     strcpy(buf, str);
     return String(buf, len); 
 }
 
 String NewString(const char* str, int len) {
-    char* buf = gStringArena.Alloc(len+1);
+    char* buf = AllocString(len+1);
     strncpy(buf, str, len+1);
     buf[len] = '\0';
     return String(buf, len);
 }
 
-String NewString(const std::string& str) {
-    size_t len = str.size();
-    char* buf = gStringArena.Alloc(len+1);
-    strcpy(buf, str.c_str());
-    return String(buf, len);
-}
-
 String ConcatStrings(const String& a, const String& b) {
     size_t len = a.Len() + b.Len();
-    char* buf = gStringArena.Alloc(len+1);
+    char* buf = AllocString(len+1);
     memcpy(buf, a.CStr(), a.Len());
     strcpy(buf + a.Len(), b.CStr());
     return String(buf, len);
 }
 
-__attribute__((__format__ (__printf__, 1, 2)))
 String FormatString(const char* fmt, ...) {
     va_list args1;
     va_start(args1, fmt);
@@ -105,17 +66,27 @@ String FormatString(const char* fmt, ...) {
     va_copy(args2, args1);
     size_t len = vsnprintf(nullptr, 0, fmt, args1);
     va_end(args1);
-    char* buf = gStringArena.Alloc(len+1);
+    char* buf = AllocString(len+1);
     vsnprintf(buf, len+1, fmt, args2); 
     va_end(args2);
     return String(buf, len);
 }
 
-namespace mobius {
-std::string BuildDir() {
+String Substring(const String& a, size_t startPos, size_t len) {
+    len = (len == size_t(-1)) ? a.Len() - startPos : len;
+    char* buf = AllocString(len+1);
+    memcpy(buf, a.CStr() + startPos, len);
+    buf[len] = '\0'; 
+    String ret(buf, len);
+    return ret; 
+}
+
+String BuildDir() {
     return "$builddir";
 }
+
 } // namespace mobius
+using namespace mobius;
 
 __attribute__((__format__ (__printf__, 1, 2)))
 void Fatal(const char* fmt, ...) {
@@ -150,14 +121,14 @@ bool MakeDir(const String& dir, bool existsOk = false) {
 }
 
 String GetCwd() {
-    char buf[4096];
-    if (!getcwd(buf, 4096)) {
+    char buf[1024];
+    if (!getcwd(buf, 1024)) {
         Fatal("Failed to getcwd.\n");
     }
     return NewString(buf);
 }
 
-String GetEnv(const String& name, const String& def = ""_s) {
+String GetEnv(const String& name, const String& def = "") {
     auto v = getenv(name.CStr());
     if (!v) return def;
     return NewString(v);
@@ -169,13 +140,12 @@ void ChangeDir(const String& path) {
     }
 }
 
-void* VirtualAlloc(size_t len) {
-    return mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
-}
-
 int Run(const String& cmd) {
     char buf[4096];
     FILE* f = popen(cmd.CStr(), "r");
+    if (!f) {
+        Fatal("Error encountered running command: \"%s\"\n", cmd.CStr());
+    }
 
     while (fgets(buf, 4096, f)) {
         printf("%s", buf);
@@ -186,25 +156,34 @@ int Run(const String& cmd) {
     return pclose(f);
 }
 
+int RunInDir(const String& cmd, const String& dir) {
+    int cwd = open(".", O_RDONLY); 
+    ChangeDir(dir);
+    int ret = Run(cmd);
+    fchdir(cwd); 
+    close(cwd);
+    return ret;
+};
+
 void AppendStandard(std::vector<String>& cflags, Standard standard) {
     switch (standard) {
         case Standard::CPP_98:
-            cflags.emplace_back("-std=c++98"_s);
+            cflags.emplace_back("-std=c++98");
             break;
         case Standard::CPP_03:
-            cflags.emplace_back("-std=c++03"_s);
+            cflags.emplace_back("-std=c++03");
             break;
         case Standard::CPP_11:
-            cflags.emplace_back("-std=c++11"_s);
+            cflags.emplace_back("-std=c++11");
             break;
         case Standard::CPP_14:
-            cflags.emplace_back("-std=c++14"_s);
+            cflags.emplace_back("-std=c++14");
             break;
         case Standard::CPP_17:
-            cflags.emplace_back("-std=c++17"_s);
+            cflags.emplace_back("-std=c++17");
             break;
         case Standard::CPP_20:
-            cflags.emplace_back("-std=c++20"_s);
+            cflags.emplace_back("-std=c++20");
             break;
         default:
             break;
@@ -214,13 +193,13 @@ void AppendStandard(std::vector<String>& cflags, Standard standard) {
 void AppendBuildType(std::vector<String>& cflags, BuildType buildType) {
     switch (buildType) {
         case BuildType::Debug:
-            cflags.emplace_back("-g -O0"_s);
+            cflags.emplace_back("-g -O0");
             break;
         case BuildType::Release:
-            cflags.emplace_back("-O3"_s);
+            cflags.emplace_back("-O3");
             break;
         case BuildType::MinSize:
-            cflags.emplace_back("-Os"_s);
+            cflags.emplace_back("-Os");
             break;
         default:
             break;
@@ -229,28 +208,30 @@ void AppendBuildType(std::vector<String>& cflags, BuildType buildType) {
 
 void AppendFlag(std::vector<String>& cflags, Flag flag, const String& flagName) {
     if (flag == Flag::On) {
-        cflags.emplace_back(ConcatStrings("-f"_s, flagName));
+        cflags.emplace_back(ConcatStrings("-f", flagName));
     } else if (flag == Flag::Off) {
-        cflags.emplace_back(ConcatStrings("-fno-"_s, flagName));
+        cflags.emplace_back(ConcatStrings("-fno-", flagName));
     }
 }
 
 void AppendIncludeDirectory(std::vector<String>& cflags, const String& directory) {
-    cflags.emplace_back(ConcatStrings("-I$root/"_s, directory));
+    cflags.emplace_back(ConcatStrings("-I$root/", directory));
 }
 
 void AppendLinkDirectory(std::vector<String>& ldflags, const String& directory) {
-    ldflags.emplace_back(ConcatStrings("-L"_s, directory));
+    ldflags.emplace_back(ConcatStrings("-L", directory));
 }
 
 void AppendLinkFlag(std::vector<String>& cflags, const String& flag) {
-    cflags.emplace_back(ConcatStrings("-Wl,"_s, flag));
+    cflags.emplace_back(ConcatStrings("-Wl,", flag));
 }
 
-std::pair<std::string, std::string> SplitExt(const std::string& path) {
-    auto startPos = path.find_first_not_of('.');
-    auto extPos = path.find_first_of('.', startPos);
-    return { path.substr(0, extPos), path.substr(extPos) };
+std::pair<String, String> SplitExt(const String& path) {
+    size_t startPos = 0;
+    while (startPos <= path.Len() && path[startPos] == '.') ++startPos;
+    size_t extPos = startPos;
+    while(extPos <= path.Len() && path[extPos] != '.') ++extPos;
+    return { Substring(path, 0, extPos), Substring(path, extPos) };
 }
 
 struct NinjaVar {
@@ -267,12 +248,12 @@ void NinjaComment(FILE* f, const String& comment) {
 }
 
 void NinjaVariable(FILE* f, const String& name, const String& value, 
-                   const String& prefix = ""_s) {
+                   const String& prefix = "") {
     fprintf(f, "%s%s = %s\n", prefix.CStr(), name.CStr(), value.CStr());
 }
 
 void NinjaVariable(FILE* f, const String& name, const std::vector<String>& value,
-                   const String& prefix = ""_s) {
+                   const String& prefix = "") {
     int lineLen = 0;
     lineLen += fprintf(f, "%s%s =", prefix.CStr(), name.CStr());
     for (const auto& v : value) {
@@ -289,7 +270,7 @@ void NinjaRule(FILE* f, const String& name, const String& command,
     fprintf(f, "rule %s\n", name.CStr());
     fprintf(f, "  command = %s\n", command.CStr());
     for (const auto& v : variables) {
-        NinjaVariable(f, v.name, v.value, "  "_s);
+        NinjaVariable(f, v.name, v.value, "  ");
     }
 }
 
@@ -306,7 +287,7 @@ void NinjaBuild(FILE* f, const String& output, const String& rule,
     fprintf(f, "\n");
     if (!variables.empty()) {
         for (const auto& v : variables) {
-            NinjaVariable(f, v.name, v.value, "  "_s);
+            NinjaVariable(f, v.name, v.value, "  ");
         }
     }
 }
@@ -357,18 +338,16 @@ int main(int argc, const char** argv) {
         Fatal("Failed to make directory \"%s\"\n", argv[1]);
     }
 
-    String cxx = GetEnv("CXX"_s, "c++"_s);
+    String cxx = GetEnv("CXX", "c++");
     String root = GetCwd();
-    String buildLib = ConcatStrings(buildDir, "/build.so"_s);
-    int cwd = open(".", O_RDONLY); 
-    ChangeDir(buildDir);
-    if (Run(ConcatStrings(cxx,
-        " -std=c++17 -O2 -shared -Wl,-undefined,dynamic_lookup "
-        "-MD -MF build.so.d ../build.cpp -o build.so"_s)) != 0) {
-        Fatal("Failed to compile build.cpp\n");
+    String buildLib = ConcatStrings(buildDir, "/build.so");
+    auto cmd = FormatString(
+        "%s -std=c++17 -O2 -shared -Wl,-undefined,dynamic_lookup"
+        " -I%s/include"
+        " -MD -MF build.so.d ../build.cpp -o build.so", cxx.CStr(), root.CStr());
+    if (RunInDir(cmd, buildDir) != 0) {
+        Fatal("Failed to run %s\n", cmd.CStr());
     }
-    fchdir(cwd); 
-    close(cwd);
 
     void* buildHandle = dlopen(buildLib.CStr(), RTLD_LAZY);
     if (!buildHandle) {
@@ -383,19 +362,22 @@ int main(int argc, const char** argv) {
     Project project = mobiusEntry->genProject(toolchain);
     const Compiler& comp = project.toolchain.compiler;
 
-    String ninjaFile = ConcatStrings(buildDir, "/build.ninja"_s);
+    String ninjaFile = ConcatStrings(buildDir, "/build.ninja");
     FILE* ninja = fopen(ninjaFile.CStr(), "w");
-    NinjaComment(ninja, "This file was generated by mobius."_s);
+    if (!ninja) {
+        Fatal("Failed to open %s for writing\n", ninjaFile.CStr());
+    }
+    NinjaComment(ninja, "This file was generated by mobius.");
     NinjaNewline(ninja);
     // Ninja globals
-    NinjaVariable(ninja, "ninja_required_version"_s, "1.3"_s);
+    NinjaVariable(ninja, "ninja_required_version", "1.3");
 
-    NinjaVariable(ninja, "root"_s, ".."_s);
-    NinjaVariable(ninja, "builddir"_s, "mobiusout"_s);
+    NinjaVariable(ninja, "root", "..");
+    NinjaVariable(ninja, "builddir", "mobiusout");
 
     // Compiler and Linker 
-    NinjaVariable(ninja, "cxx"_s, "c++"_s);
-    NinjaVariable(ninja, "ar"_s, "ar"_s);
+    NinjaVariable(ninja, "cxx", "c++");
+    NinjaVariable(ninja, "ar", "ar");
 
     // Compiler and Linker Flags and Options
     std::vector<String> cflags;
@@ -403,31 +385,31 @@ int main(int argc, const char** argv) {
 
     AppendStandard(cflags, comp.standard);
     AppendBuildType(cflags, comp.buildType);
-    AppendFlag(cflags, comp.exceptions, "exceptions"_s);
-    AppendFlag(cflags, comp.rtti, "rtti"_s);
+    AppendFlag(cflags, comp.exceptions, "exceptions");
+    AppendFlag(cflags, comp.rtti, "rtti");
 
     for (const auto& dir : project.includeDirectories) {
-        AppendIncludeDirectory(cflags, NewString(dir));
+        AppendIncludeDirectory(cflags, dir);
     }    
 
     for (const auto& dir : project.linkDirectories) {
-        AppendLinkDirectory(ldflags, NewString(dir));
+        AppendLinkDirectory(ldflags, dir);
     }
 
-    NinjaVariable(ninja, "cflags"_s, cflags);
-    NinjaVariable(ninja, "ldflags"_s, ldflags);
+    NinjaVariable(ninja, "cflags", cflags);
+    NinjaVariable(ninja, "ldflags", ldflags);
     
     NinjaNewline(ninja);
 
     // Compiler and Linker rules 
-    NinjaRule(ninja, "cxx"_s, "$cxx -MD -MF $out.d $cflags -c $in -o $out"_s, 
-                  {{"description"_s, {"CXX $out"_s}}, {"depfile"_s, {"$out.d"_s}}, {"deps"_s, {"gcc"_s}}});
+    NinjaRule(ninja, "cxx", "$cxx -MD -MF $out.d $cflags -c $in -o $out", 
+                  {{"description", {"CXX $out"}}, {"depfile", {"$out.d"}}, {"deps", {"gcc"}}});
     NinjaNewline(ninja);
 
-    NinjaRule(ninja, "ar"_s, "rm -f $out && $ar crs $out $in"_s, {{"description"_s, {"AR $out"_s}}}); 
+    NinjaRule(ninja, "ar", "rm -f $out && $ar crs $out $in", {{"description", {"AR $out"}}}); 
     NinjaNewline(ninja);
 
-    NinjaRule(ninja, "link"_s, "$cxx $ldflags -o $out $in $libs"_s, {{"description"_s, {"LINK $out"_s}}});
+    NinjaRule(ninja, "link", "$cxx $ldflags -o $out $in $libs", {{"description", {"LINK $out"}}});
     NinjaNewline(ninja);
 
     for (const auto& target : project.targets) {
@@ -435,35 +417,35 @@ int main(int argc, const char** argv) {
         objectFiles.reserve(target.inputs.size());
         for (const auto& i : target.inputs) {
             auto pair = SplitExt(i);
-            objectFiles.emplace_back(FormatString("$builddir/%s.o", pair.first.c_str()));
-            NinjaBuild(ninja, objectFiles.back(), "cxx"_s, {ConcatStrings("$root/"_s, NewString(i))});
+            objectFiles.emplace_back(FormatString("$builddir/%s.o", pair.first.CStr()));
+            NinjaBuild(ninja, objectFiles.back(), "cxx", {ConcatStrings("$root/", i)});
         }
         std::vector<NinjaVar> extraBuildVars;
         if (!target.linkFlags.empty()) {
             std::vector<String> targetLdFlags;
             targetLdFlags.reserve(target.linkFlags.size() + 1);
-            targetLdFlags.emplace_back("$ldflags"_s);
+            targetLdFlags.emplace_back("$ldflags");
             for (const auto& linkFlag : target.linkFlags) {
-                AppendLinkFlag(targetLdFlags, NewString(linkFlag)); 
+                AppendLinkFlag(targetLdFlags, linkFlag); 
             }
-            extraBuildVars.push_back(NinjaVar{"ldflags"_s, targetLdFlags});
+            extraBuildVars.push_back(NinjaVar{"ldflags", targetLdFlags});
         }
         if (target.type == TargetType::Executable) {
-            NinjaBuild(ninja, NewString(target.name), "link"_s, objectFiles, extraBuildVars);
+            NinjaBuild(ninja, target.name, "link", objectFiles, extraBuildVars);
         } else if (target.type == TargetType::StaticLibrary) {
-            NinjaBuild(ninja, ConcatStrings(NewString(target.name), ".a"_s),
-                "ar"_s, objectFiles, extraBuildVars);
+            NinjaBuild(ninja, ConcatStrings(target.name, ".a"),
+                "ar", objectFiles, extraBuildVars);
         } else if (target.type == TargetType::SharedLibrary) {
-            NinjaBuild(ninja, ConcatStrings(NewString(target.name), ".so"_s),
-                "link"_s, objectFiles, extraBuildVars);
+            NinjaBuild(ninja, ConcatStrings(target.name, ".so"),
+                "link", objectFiles, extraBuildVars);
         }
         NinjaNewline(ninja);
     }
 
     // #SoMeta
-    NinjaRule(ninja, "mobius"_s, ConcatStrings("mobius -C $root "_s, buildDir), {{"generator"_s, {"1"_s}},
-             {"depfile"_s, {"build.so.d"_s}}, {"deps"_s, {"gcc"_s}}});
-    NinjaBuild(ninja, "build.ninja"_s, "mobius"_s, {"$root/build.cpp"_s});
+    NinjaRule(ninja, "mobius", ConcatStrings("mobius -C $root ", buildDir), {{"generator", {"1"}},
+             {"depfile", {"build.so.d"}}, {"deps", {"gcc"}}});
+    NinjaBuild(ninja, "build.ninja", "mobius", {"$root/build.cpp"});
 
     fprintf(ninja, "\n");
     fclose(ninja);

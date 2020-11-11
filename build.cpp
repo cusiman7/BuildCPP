@@ -1,6 +1,8 @@
 
 #define MOBIUS_ENTRY
-#include "include/mobius/mobius.h"
+#include <mobius/mobius.h>
+
+using namespace mobius;
 
 Project GenProject(Toolchain toolchain) {
     toolchain.compiler.standard = Standard::CPP_17;
