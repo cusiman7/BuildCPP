@@ -55,10 +55,20 @@ struct Target {
 
     String name;
     TargetType type;
+    bool install = false;
+    bool isDefault = true;
     std::vector<String> inputs;
 
     std::vector<String> compileFlags;
     std::vector<String> linkFlags;
+};
+
+struct InstallHeaders {
+    InstallHeaders(String subdir, std::vector<String> headers)
+    : subdir(subdir), headers(std::move(headers)) {}
+
+    String subdir;
+    std::vector<String> headers;
 };
 
 struct Project {
@@ -70,18 +80,22 @@ struct Project {
     
     std::vector<String> includeDirectories;
     std::vector<String> linkDirectories;
+    
+    // Installation 
+    std::vector<InstallHeaders> installHeaders;
 };
 
 String BuildDir();
+String InstallationPrefix();
 
-using ProjectFn = Project (*)(Toolchain toolchain);
+using GenerateFn = Project (*)(Toolchain toolchain);
 struct MobiusEntry {
-    ProjectFn genProject;
+    GenerateFn generate;
 };
 } // namespace mobius
 
 #ifdef MOBIUS_ENTRY
-mobius::Project GenProject(mobius::Toolchain toolchain);
-mobius::MobiusEntry mobiusEntry{ GenProject };
+mobius::Project Generate(mobius::Toolchain toolchain);
+mobius::MobiusEntry mobiusEntry{ Generate };
 #endif
 

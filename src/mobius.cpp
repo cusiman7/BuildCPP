@@ -1,9 +1,11 @@
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h> // getcwd
 #include <fcntl.h> // open
 #include <dlfcn.h>
+#include <mach-o/dyld.h> // _NSGetExecutablePath
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -11,82 +13,34 @@
 #include <mobius/mobius.h>
 #include <mobius/string.h>
 
-namespace {
-void* VirtualAlloc(size_t len) {
-    return mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
-}
-
+namespace mobius {
 struct StringArena {
     char* buf = nullptr;
     size_t size = 0;
     size_t used = 0;
+    int tempCount = 0;
 };
 
-char* AllocString(size_t len) {
-    static StringArena arena;
-    if (arena.used + len > arena.size) {
-        arena.size = 1u << 30;
-        arena.buf = static_cast<char*>(VirtualAlloc(arena.size));
-        arena.used = 0;
+struct TempStringArena {
+    StringArena* arena;
+    size_t used;
+
+    ~TempStringArena() {
+        assert(arena->used >= used);
+        arena->used = used;
+        arena->tempCount--;
+        assert(arena->tempCount >= 0);
     }
-    char* ret = arena.buf + arena.used; 
-    arena.used += len;
-    return ret;
-}
-} // namespace
-
-namespace mobius {
-
-String NewString(const char* str) {
-    size_t len = strlen(str);
-    char* buf = AllocString(len+1);
-    strcpy(buf, str);
-    return String(buf, len); 
-}
-
-String NewString(const char* str, int len) {
-    char* buf = AllocString(len+1);
-    strncpy(buf, str, len+1);
-    buf[len] = '\0';
-    return String(buf, len);
-}
-
-String ConcatStrings(const String& a, const String& b) {
-    size_t len = a.Len() + b.Len();
-    char* buf = AllocString(len+1);
-    memcpy(buf, a.CStr(), a.Len());
-    strcpy(buf + a.Len(), b.CStr());
-    return String(buf, len);
-}
-
-String FormatString(const char* fmt, ...) {
-    va_list args1;
-    va_start(args1, fmt);
-    va_list args2;
-    va_copy(args2, args1);
-    size_t len = vsnprintf(nullptr, 0, fmt, args1);
-    va_end(args1);
-    char* buf = AllocString(len+1);
-    vsnprintf(buf, len+1, fmt, args2); 
-    va_end(args2);
-    return String(buf, len);
-}
-
-String Substring(const String& a, size_t startPos, size_t len) {
-    len = (len == size_t(-1)) ? a.Len() - startPos : len;
-    char* buf = AllocString(len+1);
-    memcpy(buf, a.CStr() + startPos, len);
-    buf[len] = '\0'; 
-    String ret(buf, len);
-    return ret; 
-}
-
-String BuildDir() {
-    return "$builddir";
-}
-
+};
 } // namespace mobius
-using namespace mobius;
+
+namespace {
+static mobius::StringArena stringArena;
+static mobius::StringArena tempStringArena;
+
+void* VirtualAlloc(size_t len) {
+    return mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
+}
 
 __attribute__((__format__ (__printf__, 1, 2)))
 void Fatal(const char* fmt, ...) {
@@ -96,6 +50,136 @@ void Fatal(const char* fmt, ...) {
     va_end(arglist);
     exit(1);
 }
+
+mobius::StringArena AllocStringArena(size_t len) {
+    mobius::StringArena arena;
+    arena.size = len;
+    arena.buf = static_cast<char*>(VirtualAlloc(len));
+    arena.tempCount = 0;
+    return arena;
+}
+
+mobius::TempStringArena BeginTempStringArena() {
+    mobius::TempStringArena temp;
+    temp.arena = &tempStringArena;
+    temp.used = temp.arena->used;
+    temp.arena->tempCount++;
+    return temp;
+}
+
+void InitMobius() {
+    static bool mobiusInit = false;
+    if (!mobiusInit) {
+        mobiusInit = true;
+        // >1GB of strings ought to be enough for anybody
+        stringArena = AllocStringArena(1024 * 1024 * 1024); // 1GB
+        tempStringArena = AllocStringArena(1024 * 1024 * 64); // 64MB
+    }
+}
+
+char* AllocString(mobius::StringArena* arena, size_t len) {
+    assert(arena->used + len <= arena->size);
+    char* ret = arena->buf + arena->used; 
+    arena->used += len;
+    return ret;
+}
+} // namespace
+
+namespace mobius {
+
+String NewString(StringArena* arena, const char* str) {
+    size_t len = strlen(str);
+    char* buf = AllocString(arena, len+1);
+    strcpy(buf, str);
+    return String(buf, len); 
+}
+
+String NewString(const char* str) {
+    return NewString(&stringArena, str);
+}
+
+String NewString(StringArena* arena, const char* str, int len) {
+    char* buf = AllocString(arena, len+1);
+    strncpy(buf, str, len+1);
+    buf[len] = '\0';
+    return String(buf, len);
+}
+
+String NewString(const char* str, int len) {
+    return NewString(&stringArena, str, len);
+}
+
+String ConcatStrings(StringArena* arena, const String& a, const String& b) {
+    size_t len = a.Len() + b.Len();
+    char* buf = AllocString(arena, len+1);
+    memcpy(buf, a.CStr(), a.Len());
+    memcpy(buf + a.Len(), b.CStr(), b.Len());
+    buf[len] = '\0';
+    return String(buf, len);
+}
+
+String ConcatStrings(const String& a, const String& b) {
+    return ConcatStrings(&stringArena, a, b);
+}
+
+String VFormatString(StringArena* arena, const char* fmt, va_list args1) {
+    va_list args2;
+    va_copy(args2, args1);
+    size_t len = vsnprintf(nullptr, 0, fmt, args1);
+    va_end(args1);
+    char* buf = AllocString(arena, len+1);
+    vsnprintf(buf, len+1, fmt, args2); 
+    va_end(args2);
+    return String(buf, len);
+}
+
+String FormatString(StringArena* arena, const char* fmt, ...) {
+    va_list args1;
+    va_start(args1, fmt);
+    String ret = VFormatString(arena, fmt, args1);
+    va_end(args1);
+    return ret;
+}
+
+String FormatString(const char* fmt, ...) {
+    va_list args1;
+    va_start(args1, fmt);
+    String ret = VFormatString(&stringArena, fmt, args1);
+    va_end(args1);
+    return ret;
+}
+
+String Substring(StringArena* arena, const String& a, size_t startPos, size_t len) {
+    len = (len == size_t(-1)) ? a.Len() - startPos : len;
+    char* buf = AllocString(arena, len+1);
+    memcpy(buf, a.CStr() + startPos, len);
+    buf[len] = '\0'; 
+    String ret(buf, len);
+    return ret; 
+}
+
+String Substring(const String& a, size_t startPos, size_t len) {
+    return Substring(&stringArena, a, startPos, len);
+}
+
+String CopyString(StringArena* arena, const String& a) {
+    return NewString(arena, a.CStr(), a.Len());
+}
+
+String CopyString(const String& a) {
+    return NewString(a.CStr(), a.Len());
+}
+
+String BuildDir() {
+    return "$builddir";
+}
+
+String InstallationPrefix() {
+    return "$prefix";
+}
+
+} // namespace mobius
+using namespace mobius;
 
 bool IsDir(const String& path) {
     struct stat sb;
@@ -134,6 +218,44 @@ String GetEnv(const String& name, const String& def = "") {
     return NewString(v);
 }
 
+String BaseName(const String& path) {
+    if (path.Empty()) {
+        return "";
+    }
+    // "Remove" trailing slashes
+    size_t endPos = path.Len() - 1;
+    while (endPos > 0 && path[endPos] == '/') {
+        endPos--;
+    }
+    // Look for the last slash before endPos
+    size_t lastPathSep = 0;
+    for (size_t i = 0; i < endPos; i++) {
+        if (path[i] == '/') lastPathSep = i;
+    }
+    auto ret = Substring(path, lastPathSep+1, endPos - lastPathSep);
+    return ret;
+}
+
+String DirName(const String& path) {
+    size_t lastPathSep = 0;
+    for (size_t i = 0; i < path.Len(); i++) {
+        if (path[i] == '/') lastPathSep = i;
+    }
+    return Substring(path, 0, lastPathSep);
+}
+
+std::pair<String, String> SplitExt(StringArena* arena, const String& path) {
+    size_t startPos = 0;
+    while (startPos <= path.Len() && path[startPos] == '.') ++startPos;
+    size_t extPos = startPos;
+    while(extPos <= path.Len() && path[extPos] != '.') ++extPos;
+    return { Substring(arena, path, 0, extPos), Substring(arena, path, extPos) };
+}
+
+std::pair<String, String> SplitExt(const String& path) {
+    return SplitExt(&stringArena, path);
+}
+
 void ChangeDir(const String& path) {
     if (chdir(path.CStr()) != 0) {
         Fatal("Failed to chdir to %s\n", path.CStr());
@@ -165,6 +287,18 @@ int RunInDir(const String& cmd, const String& dir) {
     return ret;
 };
 
+String GetExecutablePath() {
+    uint32_t bufsize = 1024;
+    char buf[bufsize];
+    if (_NSGetExecutablePath(buf, &bufsize) != 0) {
+        Fatal("Can't get executable path\n");
+    }
+    char realpathBuf[PATH_MAX];
+    realpath(buf, realpathBuf);
+    return NewString(realpathBuf);
+}
+
+// Build tooling helpers
 void AppendStandard(std::vector<String>& cflags, Standard standard) {
     switch (standard) {
         case Standard::CPP_98:
@@ -226,14 +360,6 @@ void AppendLinkFlag(std::vector<String>& cflags, const String& flag) {
     cflags.emplace_back(ConcatStrings("-Wl,", flag));
 }
 
-std::pair<String, String> SplitExt(const String& path) {
-    size_t startPos = 0;
-    while (startPos <= path.Len() && path[startPos] == '.') ++startPos;
-    size_t extPos = startPos;
-    while(extPos <= path.Len() && path[extPos] != '.') ++extPos;
-    return { Substring(path, 0, extPos), Substring(path, extPos) };
-}
-
 struct NinjaVar {
     String name;
     std::vector<String> value;
@@ -257,10 +383,10 @@ void NinjaVariable(FILE* f, const String& name, const std::vector<String>& value
     int lineLen = 0;
     lineLen += fprintf(f, "%s%s =", prefix.CStr(), name.CStr());
     for (const auto& v : value) {
-        lineLen += fprintf(f, " %s", v.CStr());
-        if (lineLen > 80) {
+        if (lineLen + v.Len() + 1 > 80) {
             lineLen = fprintf(f, " $\n    ");
         }
+        lineLen += fprintf(f, " %s", v.CStr());
     }
     fprintf(f, "\n");
 }
@@ -279,10 +405,10 @@ void NinjaBuild(FILE* f, const String& output, const String& rule,
     int lineLen = 0;
     lineLen += fprintf(f, "build %s: %s", output.CStr(), rule.CStr());
     for (const auto& i : inputs) {
-        lineLen += fprintf(f, " %s", i.CStr());
-        if (lineLen > 80) {
+        if (lineLen + i.Len() + 1 > 80) {
             lineLen = fprintf(f, " $\n    ");
         }
+        lineLen += fprintf(f, " %s", i.CStr());
     }
     fprintf(f, "\n");
     if (!variables.empty()) {
@@ -292,13 +418,18 @@ void NinjaBuild(FILE* f, const String& output, const String& rule,
     }
 }
 
+void NinjaDefault(FILE* f, const String& value) {
+    fprintf(f, "default %s\n", value.CStr());
+}
+
 void Usage() {
     Fatal(
 R"(usage: mobius [options] [builddir]
 
 options:
 
-  -C DIR  change to DIR before doing anything else 
+  -C DIR             change to DIR before doing anything else 
+  --prefix PREFIX    installation prefix
 )");
 }
 
@@ -306,15 +437,31 @@ bool IsArg(const char* arg, const char* name, const char* altName = nullptr) {
     return strcmp(arg, name) == 0 || (altName && strcmp(arg, altName) == 0);
 }
 
+String ConsumeOneArg(int* i, int argc, const char** argv) {
+    if (*i + 1 == argc || *argv[*i + 1] == '-') {
+        Fatal("Expected one value after %s\n", argv[*i]);
+    }
+    return NewString(argv[++(*i)]);
+}
+
 int main(int argc, const char** argv) {
+    InitMobius();
+
+    // Command line args
     String changeDir;
     String buildDir;
+    String installPrefix = "/usr/local";
+    
+    String exePath = GetExecutablePath();
+    String mobiusCommandLine;
     for (int i = 1; i < argc; i++) {
         if (*argv[i] == '-') {
             if (IsArg(argv[i], "-C")) {
-                if (i + 1 == argc || *argv[i+1] == '-') Fatal("Expected directory argument after -C\n");
-                changeDir = NewString(argv[i+1]); 
-                i++;
+                changeDir = ConsumeOneArg(&i, argc, argv);
+            } else if (IsArg(argv[i], "--prefix")) {
+                installPrefix = ConsumeOneArg(&i, argc, argv);
+                mobiusCommandLine = FormatString("%s --prefix %s",
+                                        mobiusCommandLine.CStr(), installPrefix.CStr());
             } else if (IsArg(argv[i], "-h", "--help")) {
                 Usage();
             } else {
@@ -322,8 +469,10 @@ int main(int argc, const char** argv) {
             }
         } else {
             buildDir = NewString(argv[i]);
+            mobiusCommandLine = FormatString("%s %s", mobiusCommandLine.CStr(), buildDir.CStr());
         }
     }
+
     if (buildDir.Empty()) {
         Usage();
     }
@@ -331,6 +480,9 @@ int main(int argc, const char** argv) {
         printf("mobius: Entering directory '%s'\n", changeDir.CStr()); 
         ChangeDir(changeDir);
     }
+    String root = GetCwd();
+    mobiusCommandLine = FormatString("%s -C %s", mobiusCommandLine.CStr(), root.CStr());
+
     if (!IsFile(String("build.cpp"))) {
         Fatal("No build.cpp file in current directory\n");
     }
@@ -338,13 +490,15 @@ int main(int argc, const char** argv) {
         Fatal("Failed to make directory \"%s\"\n", argv[1]);
     }
 
+    String exeDir = DirName(exePath);
     String cxx = GetEnv("CXX", "c++");
-    String root = GetCwd();
+
     String buildLib = ConcatStrings(buildDir, "/build.so");
     auto cmd = FormatString(
         "%s -std=c++17 -O2 -shared -Wl,-undefined,dynamic_lookup"
-        " -I%s/include"
-        " -MD -MF build.so.d ../build.cpp -o build.so", cxx.CStr(), root.CStr());
+        " -I%s/../include"
+        " -MD -MF build.so.d ../build.cpp -o build.so", cxx.CStr(), exeDir.CStr());
+    printf("Running: %s\n", cmd.CStr());
     if (RunInDir(cmd, buildDir) != 0) {
         Fatal("Failed to run %s\n", cmd.CStr());
     }
@@ -359,7 +513,7 @@ int main(int argc, const char** argv) {
     }
 
     Toolchain toolchain;
-    Project project = mobiusEntry->genProject(toolchain);
+    Project project = mobiusEntry->generate(toolchain);
     const Compiler& comp = project.toolchain.compiler;
 
     String ninjaFile = ConcatStrings(buildDir, "/build.ninja");
@@ -374,10 +528,16 @@ int main(int argc, const char** argv) {
 
     NinjaVariable(ninja, "root", "..");
     NinjaVariable(ninja, "builddir", "mobiusout");
+    // Command line and args
+    NinjaVariable(ninja, "prefix", installPrefix);
+    NinjaVariable(ninja, "mobiusexe", exePath);
+    NinjaVariable(ninja, "mobiuscommandline", mobiusCommandLine);
 
     // Compiler and Linker 
     NinjaVariable(ninja, "cxx", "c++");
     NinjaVariable(ninja, "ar", "ar");
+
+    // Install/System tools
 
     // Compiler and Linker Flags and Options
     std::vector<String> cflags;
@@ -412,13 +572,22 @@ int main(int argc, const char** argv) {
     NinjaRule(ninja, "link", "$cxx $ldflags -o $out $in $libs", {{"description", {"LINK $out"}}});
     NinjaNewline(ninja);
 
+    // Install Rules
+    NinjaRule(ninja, "cp", "cp -pR $in $out", {{"description", {"INSTALL $out"}}});
+    NinjaNewline(ninja);
+
+    // Targets
+    std::vector<String> allInstallTargets;
     for (const auto& target : project.targets) {
+        // We create a lot of temp strings per target
+        auto tempMem = BeginTempStringArena();
+
         std::vector<String> objectFiles;
         objectFiles.reserve(target.inputs.size());
         for (const auto& i : target.inputs) {
-            auto pair = SplitExt(i);
-            objectFiles.emplace_back(FormatString("$builddir/%s.o", pair.first.CStr()));
-            NinjaBuild(ninja, objectFiles.back(), "cxx", {ConcatStrings("$root/", i)});
+            auto pair = SplitExt(tempMem.arena, i);
+            objectFiles.emplace_back(FormatString(tempMem.arena, "$builddir/%s.o", pair.first.CStr()));
+            NinjaBuild(ninja, objectFiles.back(), "cxx", {ConcatStrings(tempMem.arena, "$root/", i)});
         }
         std::vector<NinjaVar> extraBuildVars;
         if (!target.linkFlags.empty()) {
@@ -430,20 +599,58 @@ int main(int argc, const char** argv) {
             }
             extraBuildVars.push_back(NinjaVar{"ldflags", targetLdFlags});
         }
-        if (target.type == TargetType::Executable) {
-            NinjaBuild(ninja, target.name, "link", objectFiles, extraBuildVars);
-        } else if (target.type == TargetType::StaticLibrary) {
-            NinjaBuild(ninja, ConcatStrings(target.name, ".a"),
-                "ar", objectFiles, extraBuildVars);
-        } else if (target.type == TargetType::SharedLibrary) {
-            NinjaBuild(ninja, ConcatStrings(target.name, ".so"),
-                "link", objectFiles, extraBuildVars);
+        String targetOut;
+        String buildRule;
+        String installDir;
+        switch (target.type) {
+            case TargetType::Executable:
+                targetOut = target.name;
+                buildRule = "link";
+                installDir = "bin";
+                break;
+            case TargetType::StaticLibrary:
+                targetOut = ConcatStrings(tempMem.arena, target.name, ".a");
+                buildRule = "ar";
+                installDir = "lib";
+                break;
+            case TargetType::SharedLibrary:
+                targetOut = ConcatStrings(tempMem.arena, target.name, ".so");
+                buildRule = "link";
+                installDir = "lib";
+                break;
+            case TargetType::MacOSBundle:
+                Fatal("MacOSBundle target type not implemented yet\n");
+                break;
+        } 
+        NinjaBuild(ninja, targetOut, buildRule, objectFiles, extraBuildVars);
+
+        if (target.isDefault) {
+            NinjaDefault(ninja, target.name);
+        }
+
+        if (target.install) {
+            String installOut = FormatString("$prefix/%s/%s", installDir.CStr(), targetOut.CStr());
+            NinjaBuild(ninja, installOut, "cp", {target.name});
+            allInstallTargets.emplace_back(installOut);
         }
         NinjaNewline(ninja);
     }
 
+    // Install
+    for (const auto& installHeaders : project.installHeaders) {
+        for (const auto& header : installHeaders.headers) {
+            String installName = FormatString("$prefix/include/%s/%s",
+                                    installHeaders.subdir.CStr(), BaseName(header).CStr());
+            NinjaBuild(ninja, installName, "cp", {ConcatStrings("$root/", header)});
+            allInstallTargets.emplace_back(installName);
+        }
+    }
+    NinjaNewline(ninja);
+    NinjaBuild(ninja, "install", "phony", allInstallTargets);
+    NinjaNewline(ninja);
+
     // #SoMeta
-    NinjaRule(ninja, "mobius", ConcatStrings("mobius -C $root ", buildDir), {{"generator", {"1"}},
+    NinjaRule(ninja, "mobius", "$mobiusexe $mobiuscommandline", {{"generator", {"1"}},
              {"depfile", {"build.so.d"}}, {"deps", {"gcc"}}});
     NinjaBuild(ninja, "build.ninja", "mobius", {"$root/build.cpp"});
 
