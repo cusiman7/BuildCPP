@@ -14,6 +14,25 @@
 #include <mobius/string.h>
 
 namespace mobius {
+String::String(const char* str) : buf_(str), len_(strlen(str)) {}
+String::String(const char* str, size_t len) : buf_(str), len_(len) {}
+
+bool String::Empty() const {
+    return len_ == 0;
+}
+
+size_t String::Len() const {
+    return len_;
+}
+
+const char* String::CStr() const {
+    return buf_;
+}
+
+const char& String::operator[](size_t i) const {
+    return buf_[i];
+}
+
 struct StringArena {
     char* buf = nullptr;
     size_t size = 0;
@@ -204,12 +223,16 @@ bool MakeDir(const String& dir, bool existsOk = false) {
     return mkdir(dir.CStr(), 0777) == 0;
 }
 
-String GetCwd() {
+String GetCwd(StringArena* arena) {
     char buf[1024];
     if (!getcwd(buf, 1024)) {
         Fatal("Failed to getcwd.\n");
     }
-    return NewString(buf);
+    return NewString(arena, buf);
+}
+
+String GetCwd() {
+    return GetCwd(&stringArena);
 }
 
 String GetEnv(const String& name, const String& def = "") {
@@ -242,6 +265,54 @@ String DirName(const String& path) {
         if (path[i] == '/') lastPathSep = i;
     }
     return Substring(path, 0, lastPathSep);
+}
+
+String RealPath(StringArena* arena, const String& path) {
+    char realpathBuf[PATH_MAX];
+    realpath(path.CStr(), realpathBuf);
+    return NewString(arena, realpathBuf);
+}
+
+String RealPath(const String& path) {
+    return RealPath(&stringArena, path);
+}
+
+String RelativePath(const String& toPath, String start) {
+    auto tempMem = BeginTempStringArena();
+
+    if (start.Empty()) {
+        start = GetCwd(tempMem.arena);
+    }
+    String absToPath = RealPath(tempMem.arena, toPath);
+    String absStart = RealPath(tempMem.arena, start);
+    
+    int absStartSepCount = 0;
+    for (auto c : absStart) {
+        if (c == '/') absStartSepCount++;
+    }
+
+    size_t commonPathLen = 0;
+    int commonSepCount = 0;
+    while (commonPathLen < absToPath.Len() && commonPathLen < absStart.Len()) {
+        if (absToPath[commonPathLen] != absStart[commonPathLen]) {
+            break;
+        }
+        if (absToPath[commonPathLen] == '/') commonSepCount++;
+        commonPathLen++;
+    }
+    if (commonPathLen == absToPath.Len() && commonPathLen == absStart.Len()) {
+        return ".";
+    } 
+    if (commonPathLen < absToPath.Len()) commonPathLen++;
+    String relPath = Substring(tempMem.arena, absToPath, commonPathLen);
+    const int backSteps = absStartSepCount - commonSepCount;
+    if (backSteps > 0) {
+        relPath = ConcatStrings(tempMem.arena, relPath, "..");
+    }
+    for (int i = 1; i < backSteps; ++i) {
+        relPath = ConcatStrings(tempMem.arena, relPath, "/..");
+    }
+    return CopyString(relPath);
 }
 
 std::pair<String, String> SplitExt(StringArena* arena, const String& path) {
@@ -293,9 +364,7 @@ String GetExecutablePath() {
     if (_NSGetExecutablePath(buf, &bufsize) != 0) {
         Fatal("Can't get executable path\n");
     }
-    char realpathBuf[PATH_MAX];
-    realpath(buf, realpathBuf);
-    return NewString(realpathBuf);
+    return RealPath(buf);
 }
 
 // Build tooling helpers
@@ -346,6 +415,10 @@ void AppendFlag(std::vector<String>& cflags, Flag flag, const String& flagName) 
     } else if (flag == Flag::Off) {
         cflags.emplace_back(ConcatStrings("-fno-", flagName));
     }
+}
+
+void AppendCompileFlag(std::vector<String>& cflags, const String& flag) {
+    cflags.emplace_back(flag);
 }
 
 void AppendIncludeDirectory(std::vector<String>& cflags, const String& directory) {
@@ -490,6 +563,9 @@ int main(int argc, const char** argv) {
         Fatal("Failed to make directory \"%s\"\n", argv[1]);
     }
 
+    // Build a relative path from buildDir back to root
+    String relativeRoot = RelativePath(root, buildDir);
+    
     String exeDir = DirName(exePath);
     String cxx = GetEnv("CXX", "c++");
 
@@ -497,8 +573,7 @@ int main(int argc, const char** argv) {
     auto cmd = FormatString(
         "%s -std=c++17 -O2 -shared -Wl,-undefined,dynamic_lookup"
         " -I%s/../include"
-        " -MD -MF build.so.d ../build.cpp -o build.so", cxx.CStr(), exeDir.CStr());
-    printf("Running: %s\n", cmd.CStr());
+        " -MD -MF build.so.d %s/build.cpp -o build.so", cxx.CStr(), exeDir.CStr(), relativeRoot.CStr());
     if (RunInDir(cmd, buildDir) != 0) {
         Fatal("Failed to run %s\n", cmd.CStr());
     }
@@ -526,7 +601,7 @@ int main(int argc, const char** argv) {
     // Ninja globals
     NinjaVariable(ninja, "ninja_required_version", "1.3");
 
-    NinjaVariable(ninja, "root", "..");
+    NinjaVariable(ninja, "root", relativeRoot);
     NinjaVariable(ninja, "builddir", "mobiusout");
     // Command line and args
     NinjaVariable(ninja, "prefix", installPrefix);
@@ -548,12 +623,20 @@ int main(int argc, const char** argv) {
     AppendFlag(cflags, comp.exceptions, "exceptions");
     AppendFlag(cflags, comp.rtti, "rtti");
 
+    cflags.reserve(cflags.size() + project.includeDirectories.size() + project.compileFlags.size());
     for (const auto& dir : project.includeDirectories) {
         AppendIncludeDirectory(cflags, dir);
-    }    
+    }
+    for (const auto& flag : project.compileFlags) {
+        AppendCompileFlag(cflags, flag);
+    }
 
+    ldflags.reserve(ldflags.size() + project.linkDirectories.size() + project.linkFlags.size());
     for (const auto& dir : project.linkDirectories) {
         AppendLinkDirectory(ldflags, dir);
+    }
+    for (const auto& flag : project.linkFlags) {
+        AppendLinkFlag(ldflags, flag);
     }
 
     NinjaVariable(ninja, "cflags", cflags);
@@ -582,22 +665,40 @@ int main(int argc, const char** argv) {
         // We create a lot of temp strings per target
         auto tempMem = BeginTempStringArena();
 
+        std::vector<NinjaVar> extraCompileVars;
+        if (!target.includeDirectories.empty() || !target.compileFlags.empty()) {
+            std::vector<String> targetCFlags;
+            targetCFlags.reserve(target.includeDirectories.size() + target.compileFlags.size() + 1);
+            targetCFlags.emplace_back("$cflags");
+            for (const auto& dir : target.includeDirectories) {
+                AppendIncludeDirectory(targetCFlags, dir);
+            }
+            for (const auto& flag : target.compileFlags) {
+                AppendCompileFlag(targetCFlags, flag);
+            }
+            extraCompileVars.push_back(NinjaVar{"cflags", targetCFlags});
+        }
+
         std::vector<String> objectFiles;
         objectFiles.reserve(target.inputs.size());
         for (const auto& i : target.inputs) {
             auto pair = SplitExt(tempMem.arena, i);
             objectFiles.emplace_back(FormatString(tempMem.arena, "$builddir/%s.o", pair.first.CStr()));
-            NinjaBuild(ninja, objectFiles.back(), "cxx", {ConcatStrings(tempMem.arena, "$root/", i)});
+            NinjaBuild(ninja, objectFiles.back(), "cxx", {ConcatStrings(tempMem.arena, "$root/", i)}, extraCompileVars);
         }
-        std::vector<NinjaVar> extraBuildVars;
-        if (!target.linkFlags.empty()) {
+
+        std::vector<NinjaVar> extraLinkVars;
+        if (!target.linkFlags.empty() || !target.linkDirectories.empty()) {
             std::vector<String> targetLdFlags;
-            targetLdFlags.reserve(target.linkFlags.size() + 1);
+            targetLdFlags.reserve(target.linkFlags.size() + target.linkDirectories.size() + 1);
             targetLdFlags.emplace_back("$ldflags");
+            for (const auto& dir : target.linkDirectories) {
+                AppendLinkDirectory(targetLdFlags, dir);
+            }
             for (const auto& linkFlag : target.linkFlags) {
                 AppendLinkFlag(targetLdFlags, linkFlag); 
             }
-            extraBuildVars.push_back(NinjaVar{"ldflags", targetLdFlags});
+            extraLinkVars.push_back(NinjaVar{"ldflags", targetLdFlags});
         }
         String targetOut;
         String buildRule;
@@ -622,7 +723,7 @@ int main(int argc, const char** argv) {
                 Fatal("MacOSBundle target type not implemented yet\n");
                 break;
         } 
-        NinjaBuild(ninja, targetOut, buildRule, objectFiles, extraBuildVars);
+        NinjaBuild(ninja, targetOut, buildRule, objectFiles, extraLinkVars);
 
         if (target.isDefault) {
             NinjaDefault(ninja, target.name);
@@ -646,8 +747,10 @@ int main(int argc, const char** argv) {
         }
     }
     NinjaNewline(ninja);
-    NinjaBuild(ninja, "install", "phony", allInstallTargets);
-    NinjaNewline(ninja);
+    if (!allInstallTargets.empty()) {
+        NinjaBuild(ninja, "install", "phony", allInstallTargets);
+        NinjaNewline(ninja);
+    }
 
     // #SoMeta
     NinjaRule(ninja, "mobius", "$mobiusexe $mobiuscommandline", {{"generator", {"1"}},

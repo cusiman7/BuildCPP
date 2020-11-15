@@ -11,19 +11,18 @@ Project Generate(Toolchain toolchain) {
     toolchain.compiler.exceptions = Flag::Off;
 
     Project project(toolchain); 
-    project.includeDirectories = {"include"};
-    project.linkDirectories = { mobius::BuildDir() };
 
-    InstallHeaders mobiusHeaders("mobius",
-        {"include/mobius/mobius.h", "include/mobius/string.h"});
-    project.installHeaders.emplace_back(std::move(mobiusHeaders)); 
-
-    Target mobius("mobius", TargetType::Executable);
+    Target mobius("mobius", TargetType::Executable, {"src/mobius.cpp"});
+    mobius.includeDirectories = {"include"};
+    mobius.linkDirectories = { mobius::BuildDir() };
     mobius.install = true;
-    mobius.inputs = {"src/mobius.cpp"};
     mobius.linkFlags = {"-export_dynamic"};
 
     project.targets.emplace_back(std::move(mobius));
+    
+    InstallHeaders mobiusHeaders("mobius",
+        {"include/mobius/mobius.h", "include/mobius/string.h"});
+    project.installHeaders.emplace_back(std::move(mobiusHeaders)); 
 
     return project;
 }

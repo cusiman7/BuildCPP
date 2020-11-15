@@ -47,6 +47,12 @@ struct Toolchain {
     Compiler compiler;
 };
 
+struct Target;
+struct Dependency {
+    std::vector<String> includeDirectories;
+    std::vector<String> libraries; 
+};
+
 struct Target {
     Target(String name, TargetType type) 
     : name(name), type(type) {}
@@ -58,6 +64,9 @@ struct Target {
     bool install = false;
     bool isDefault = true;
     std::vector<String> inputs;
+    
+    std::vector<String> includeDirectories;
+    std::vector<String> linkDirectories;
 
     std::vector<String> compileFlags;
     std::vector<String> linkFlags;
@@ -80,6 +89,9 @@ struct Project {
     
     std::vector<String> includeDirectories;
     std::vector<String> linkDirectories;
+
+    std::vector<String> compileFlags;
+    std::vector<String> linkFlags;
     
     // Installation 
     std::vector<InstallHeaders> installHeaders;

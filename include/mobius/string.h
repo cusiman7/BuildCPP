@@ -17,24 +17,17 @@ struct String {
     String(String&&) = default;
     String& operator=(const String&) = default;
     String& operator=(String&&) = default;
-    String(const char* str) : buf_(str), len_(strlen(str)) {}
-    String(const char* str, size_t len) : buf_(str), len_(len) {}
+    String(const char* str);
+    String(const char* str, size_t len);
 
-    bool Empty() const {
-        return len_ == 0;
-    }
+    bool Empty() const;
+    size_t Len() const;
+    const char* CStr() const;
+    const char& operator[](size_t i) const;
 
-    size_t Len() const {
-        return len_;
-    }
+    const char* begin() const { return buf_; }
+    const char* end() const { return buf_ + len_ + 1; }
 
-    const char* CStr() const {
-        return buf_;
-    }
-
-    const char& operator[](size_t i) const {
-        return buf_[i];
-    }
 private:
     const char* buf_ = "";
     size_t len_ = 0;
