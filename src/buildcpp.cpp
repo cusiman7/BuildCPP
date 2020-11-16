@@ -10,10 +10,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#include <mobius/mobius.h>
-#include <mobius/string.h>
+#include <buildcpp/buildcpp.h>
+#include <buildcpp/string.h>
 
-namespace mobius {
+namespace bcpp {
 String::String(const char* str) : buf_(str), len_(strlen(str)) {}
 String::String(const char* str, size_t len) : buf_(str), len_(len) {}
 
@@ -51,11 +51,11 @@ struct TempStringArena {
         assert(arena->tempCount >= 0);
     }
 };
-} // namespace mobius
+} // namespace bcpp
 
 namespace {
-static mobius::StringArena stringArena;
-static mobius::StringArena tempStringArena;
+static bcpp::StringArena stringArena;
+static bcpp::StringArena tempStringArena;
 
 void* VirtualAlloc(size_t len) {
     return mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
@@ -70,33 +70,33 @@ void Fatal(const char* fmt, ...) {
     exit(1);
 }
 
-mobius::StringArena AllocStringArena(size_t len) {
-    mobius::StringArena arena;
+bcpp::StringArena AllocStringArena(size_t len) {
+    bcpp::StringArena arena;
     arena.size = len;
     arena.buf = static_cast<char*>(VirtualAlloc(len));
     arena.tempCount = 0;
     return arena;
 }
 
-mobius::TempStringArena BeginTempStringArena() {
-    mobius::TempStringArena temp;
+bcpp::TempStringArena BeginTempStringArena() {
+    bcpp::TempStringArena temp;
     temp.arena = &tempStringArena;
     temp.used = temp.arena->used;
     temp.arena->tempCount++;
     return temp;
 }
 
-void InitMobius() {
-    static bool mobiusInit = false;
-    if (!mobiusInit) {
-        mobiusInit = true;
+void InitBuildCpp() {
+    static bool bcppInit = false;
+    if (!bcppInit) {
+        bcppInit = true;
         // >1GB of strings ought to be enough for anybody
         stringArena = AllocStringArena(1024 * 1024 * 1024); // 1GB
         tempStringArena = AllocStringArena(1024 * 1024 * 64); // 64MB
     }
 }
 
-char* AllocString(mobius::StringArena* arena, size_t len) {
+char* AllocString(bcpp::StringArena* arena, size_t len) {
     assert(arena->used + len <= arena->size);
     char* ret = arena->buf + arena->used; 
     arena->used += len;
@@ -104,7 +104,7 @@ char* AllocString(mobius::StringArena* arena, size_t len) {
 }
 } // namespace
 
-namespace mobius {
+namespace bcpp {
 
 String NewString(StringArena* arena, const char* str) {
     size_t len = strlen(str);
@@ -197,8 +197,8 @@ String InstallationPrefix() {
     return "$prefix";
 }
 
-} // namespace mobius
-using namespace mobius;
+} // namespace bcpp
+using namespace bcpp;
 
 bool IsDir(const String& path) {
     struct stat sb;
@@ -497,7 +497,7 @@ void NinjaDefault(FILE* f, const String& value) {
 
 void Usage() {
     Fatal(
-R"(usage: mobius [options] [builddir]
+R"(usage: buildcpp [options] [builddir]
 
 options:
 
@@ -518,7 +518,7 @@ String ConsumeOneArg(int* i, int argc, const char** argv) {
 }
 
 int main(int argc, const char** argv) {
-    InitMobius();
+    InitBuildCpp();
 
     // Command line args
     String changeDir;
@@ -526,15 +526,15 @@ int main(int argc, const char** argv) {
     String installPrefix = "/usr/local";
     
     String exePath = GetExecutablePath();
-    String mobiusCommandLine;
+    String bcppCommandLine;
     for (int i = 1; i < argc; i++) {
         if (*argv[i] == '-') {
             if (IsArg(argv[i], "-C")) {
                 changeDir = ConsumeOneArg(&i, argc, argv);
             } else if (IsArg(argv[i], "--prefix")) {
                 installPrefix = ConsumeOneArg(&i, argc, argv);
-                mobiusCommandLine = FormatString("%s --prefix %s",
-                                        mobiusCommandLine.CStr(), installPrefix.CStr());
+                bcppCommandLine = FormatString("%s --prefix %s",
+                                        bcppCommandLine.CStr(), installPrefix.CStr());
             } else if (IsArg(argv[i], "-h", "--help")) {
                 Usage();
             } else {
@@ -542,7 +542,7 @@ int main(int argc, const char** argv) {
             }
         } else {
             buildDir = NewString(argv[i]);
-            mobiusCommandLine = FormatString("%s %s", mobiusCommandLine.CStr(), buildDir.CStr());
+            bcppCommandLine = FormatString("%s %s", bcppCommandLine.CStr(), buildDir.CStr());
         }
     }
 
@@ -550,11 +550,10 @@ int main(int argc, const char** argv) {
         Usage();
     }
     if (!changeDir.Empty()) {
-        printf("mobius: Entering directory '%s'\n", changeDir.CStr()); 
+        printf("bcpp: Entering directory '%s'\n", changeDir.CStr()); 
         ChangeDir(changeDir);
     }
     String root = GetCwd();
-    mobiusCommandLine = FormatString("%s -C %s", mobiusCommandLine.CStr(), root.CStr());
 
     if (!IsFile(String("build.cpp"))) {
         Fatal("No build.cpp file in current directory\n");
@@ -565,6 +564,7 @@ int main(int argc, const char** argv) {
 
     // Build a relative path from buildDir back to root
     String relativeRoot = RelativePath(root, buildDir);
+    bcppCommandLine = FormatString("%s -C %s", bcppCommandLine.CStr(), "$root");
     
     String exeDir = DirName(exePath);
     String cxx = GetEnv("CXX", "c++");
@@ -582,13 +582,13 @@ int main(int argc, const char** argv) {
     if (!buildHandle) {
         Fatal("Failed to load \"%s\"\n", buildLib.CStr());
     }
-    auto mobiusEntry = static_cast<MobiusEntry*>(dlsym(buildHandle, "mobiusEntry"));
-    if (!mobiusEntry) {
-        Fatal("Failed to find symbol \"mobiusEntry\" in %s", buildLib.CStr());
+    auto bcppEntry = static_cast<BuildCppEntry*>(dlsym(buildHandle, "buildCppEntry"));
+    if (!bcppEntry) {
+        Fatal("Failed to find symbol \"bcppEntry\" in %s\n", buildLib.CStr());
     }
 
     Toolchain toolchain;
-    Project project = mobiusEntry->generate(toolchain);
+    Project project = bcppEntry->generate(toolchain);
     const Compiler& comp = project.toolchain.compiler;
 
     String ninjaFile = ConcatStrings(buildDir, "/build.ninja");
@@ -596,17 +596,17 @@ int main(int argc, const char** argv) {
     if (!ninja) {
         Fatal("Failed to open %s for writing\n", ninjaFile.CStr());
     }
-    NinjaComment(ninja, "This file was generated by mobius.");
+    NinjaComment(ninja, "This file was generated by bcpp.");
     NinjaNewline(ninja);
     // Ninja globals
     NinjaVariable(ninja, "ninja_required_version", "1.3");
 
     NinjaVariable(ninja, "root", relativeRoot);
-    NinjaVariable(ninja, "builddir", "mobiusout");
+    NinjaVariable(ninja, "builddir", "bcppout");
     // Command line and args
     NinjaVariable(ninja, "prefix", installPrefix);
-    NinjaVariable(ninja, "mobiusexe", exePath);
-    NinjaVariable(ninja, "mobiuscommandline", mobiusCommandLine);
+    NinjaVariable(ninja, "bcppexe", exePath);
+    NinjaVariable(ninja, "bcppcommandline", bcppCommandLine);
 
     // Compiler and Linker 
     NinjaVariable(ninja, "cxx", "c++");
@@ -753,9 +753,9 @@ int main(int argc, const char** argv) {
     }
 
     // #SoMeta
-    NinjaRule(ninja, "mobius", "$mobiusexe $mobiuscommandline", {{"generator", {"1"}},
+    NinjaRule(ninja, "buildcpp", "$bcppexe $bcppcommandline", {{"generator", {"1"}},
              {"depfile", {"build.so.d"}}, {"deps", {"gcc"}}});
-    NinjaBuild(ninja, "build.ninja", "mobius", {"$root/build.cpp"});
+    NinjaBuild(ninja, "build.ninja", "buildcpp", {"$root/build.cpp"});
 
     fprintf(ninja, "\n");
     fclose(ninja);

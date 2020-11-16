@@ -1,8 +1,8 @@
 
-#define MOBIUS_ENTRY
-#include <mobius/mobius.h>
+#define BUILDCPP_ENTRY
+#include <buildcpp/buildcpp.h>
 
-using namespace mobius;
+using namespace bcpp;
 
 Project Generate(Toolchain toolchain) {
     toolchain.compiler.standard = Standard::CPP_17;
@@ -12,17 +12,17 @@ Project Generate(Toolchain toolchain) {
 
     Project project(toolchain); 
 
-    Target mobius("mobius", TargetType::Executable, {"src/mobius.cpp"});
-    mobius.includeDirectories = {"include"};
-    mobius.linkDirectories = { mobius::BuildDir() };
-    mobius.install = true;
-    mobius.linkFlags = {"-export_dynamic"};
+    Target buildcpp("buildcpp", TargetType::Executable, {"src/buildcpp.cpp"});
+    buildcpp.includeDirectories = {"include"};
+    buildcpp.linkDirectories = { bcpp::BuildDir() };
+    buildcpp.install = true;
+    buildcpp.linkFlags = {"-export_dynamic"};
 
-    project.targets.emplace_back(std::move(mobius));
+    project.targets.emplace_back(std::move(buildcpp));
     
-    InstallHeaders mobiusHeaders("mobius",
-        {"include/mobius/mobius.h", "include/mobius/string.h"});
-    project.installHeaders.emplace_back(std::move(mobiusHeaders)); 
+    InstallHeaders buildcppHeaders("buildcpp",
+        {"include/buildcpp/buildcpp.h", "include/buildcpp/string.h"});
+    project.installHeaders.emplace_back(std::move(buildcppHeaders)); 
 
     return project;
 }

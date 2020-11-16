@@ -1,4 +1,6 @@
 build
+macosbuild
+!macosbuild/build.ninja
 mobius
 !include/*
 *.swp

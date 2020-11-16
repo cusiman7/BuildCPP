@@ -2,9 +2,9 @@
 #pragma once
 
 #include <vector>
-#include <mobius/string.h>
+#include <buildcpp/string.h>
 
-namespace mobius {
+namespace bcpp {
 
 enum class TargetType {
     Executable,
@@ -101,13 +101,13 @@ String BuildDir();
 String InstallationPrefix();
 
 using GenerateFn = Project (*)(Toolchain toolchain);
-struct MobiusEntry {
+struct BuildCppEntry {
     GenerateFn generate;
 };
-} // namespace mobius
+} // namespace bcpp 
 
-#ifdef MOBIUS_ENTRY
-mobius::Project Generate(mobius::Toolchain toolchain);
-mobius::MobiusEntry mobiusEntry{ Generate };
+#ifdef BUILDCPP_ENTRY
+bcpp::Project Generate(bcpp::Toolchain toolchain);
+bcpp::BuildCppEntry buildCppEntry{ Generate };
 #endif
 

@@ -1,7 +1,7 @@
 
 #pragma once
 
-namespace mobius {
+namespace bcpp {
 
 /*
  * Unlike std::string String is:
@@ -52,5 +52,5 @@ __attribute__((__format__ (__printf__, 2, 3)))
 String FormatString(StringArena* arena, const char* fmt, ...);
 String Substring(StringArena* arena, const String& a, size_t startPos, size_t len = -1);
 
-} // namespace mobius
+} // namespace bcpp 
 
