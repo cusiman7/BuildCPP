@@ -6,3 +6,4 @@ mobius
 *.swp
 tags
 *.dSYM
+.ninja*
